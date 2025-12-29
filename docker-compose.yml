@@ -1,0 +1,14 @@
+services:
+  gemini-proxy:
+    build: .
+    container_name: gemini-openai-proxy
+    ports:
+      - "3000:3000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GOOGLE_GEMINI_BASE_URL=${GOOGLE_GEMINI_BASE_URL:-https://generativelanguage.googleapis.com}
+      - DEBUG=${DEBUG:-false}
+      - TIMEOUT=${TIMEOUT:-600}
+      - MAX_RETRIES=${MAX_RETRIES:-5}
+      - RETRY_DELAY=${RETRY_DELAY:-1}
+    restart: unless-stopped
