@@ -84,11 +84,11 @@ curl http://localhost:3000/v1/models
 
 ## Supported Models
 
+- `gemini-3-pro-preview` (Latest)
+- `gemini-3-flash-preview` (Latest)
 - `gemini-2.5-pro`
 - `gemini-2.5-flash`
 - `gemini-2.0-flash`
-- `gemini-1.5-pro`
-- `gemini-1.5-flash`
 
 You can use any model name supported by the Gemini CLI.
 

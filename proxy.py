@@ -410,11 +410,11 @@ async def models():
     return JSONResponse({
         "object": "list",
         "data": [
+            {"id": "gemini-3-pro-preview", "object": "model", "owned_by": "google"},
+            {"id": "gemini-3-flash-preview", "object": "model", "owned_by": "google"},
             {"id": "gemini-2.5-pro", "object": "model", "owned_by": "google"},
             {"id": "gemini-2.5-flash", "object": "model", "owned_by": "google"},
             {"id": "gemini-2.0-flash", "object": "model", "owned_by": "google"},
-            {"id": "gemini-1.5-pro", "object": "model", "owned_by": "google"},
-            {"id": "gemini-1.5-flash", "object": "model", "owned_by": "google"},
         ]
     })
 
