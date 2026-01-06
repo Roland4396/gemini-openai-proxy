@@ -23,7 +23,7 @@ app = FastAPI()
 
 # Configuration
 TIMEOUT = int(os.environ.get('TIMEOUT', '600'))
-DEBUG = os.environ.get('DEBUG', 'false').lower() == 'true'
+DEBUG = os.environ.get('DEBUG', 'true').lower() == 'true'
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 GOOGLE_GEMINI_BASE_URL = os.environ.get('GOOGLE_GEMINI_BASE_URL', 'https://generativelanguage.googleapis.com')
 
@@ -98,137 +98,96 @@ async def call_gemini_cli_stream(prompt: str, model: str, retry_count: int = 0) 
 
     log(f"Calling gemini-cli: model={model}, prompt_len={len(prompt)}, retry={retry_count}")
 
+    # 保存发送给CLI的完整prompt（不做任何处理）
+    raw_save_dir = "/app/logs"
+    os.makedirs(raw_save_dir, exist_ok=True)
+    prompt_filename = f"{raw_save_dir}/sent_prompt_{int(time.time())}_{retry_count}.txt"
+    try:
+        with open(prompt_filename, 'w', encoding='utf-8') as f:
+            f.write(prompt)
+        log(f"[PROMPT SAVED] {prompt_filename} ({len(prompt)} chars)")
+    except Exception as e:
+        log(f"[PROMPT SAVE ERROR] {e}")
+
     # Write to temp file to avoid command line length limits
     with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8') as f:
         f.write(prompt)
         prompt_file = f.name
 
+    # 用临时文件存储输出，避免管道缓冲区限制
+    output_file = f"/tmp/gemini_output_{int(time.time())}_{retry_count}.json"
+
     process = None
     try:
-        cmd = ['gemini', '-m', model, '--output-format', 'json']
-        log(f"Command: {' '.join(cmd)}")
+        # 使用shell重定向，输出到文件，stderr丢弃
+        cmd = f'gemini -m {model} --output-format json < "{prompt_file}" > "{output_file}" 2>/dev/null'
+        log(f"Command: {cmd}")
 
-        with open(prompt_file, 'r', encoding='utf-8') as f:
-            prompt_content = f.read()
-
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        process = await asyncio.create_subprocess_shell(
+            cmd,
             env=env
         )
         log(f"Process started, pid={process.pid}")
 
-        # Concurrent stdin write to avoid deadlock
-        async def write_stdin():
-            try:
-                data = prompt_content.encode('utf-8')
-                total_len = len(data)
-                written = 0
-                WRITE_CHUNK = 8192
+        # 等待进程完成
+        try:
+            await asyncio.wait_for(process.wait(), timeout=TIMEOUT)
+        except asyncio.TimeoutError:
+            log("Gemini CLI timeout")
+            process.kill()
+            raise Exception("Gemini CLI timeout")
 
-                while written < total_len:
-                    chunk = data[written:written + WRITE_CHUNK]
-                    process.stdin.write(chunk)
-                    await process.stdin.drain()
-                    written += len(chunk)
+        log(f"[EXIT] code={process.returncode}")
 
-                process.stdin.close()
-                await process.stdin.wait_closed()
-                log(f"Stdin: DONE, total written={written} bytes")
-            except Exception as e:
-                log(f"Stdin write error: {e}")
+        # 从文件读取完整输出
+        with open(output_file, 'rb') as f:
+            raw_bytes = f.read()
+        buffer = raw_bytes.decode('utf-8', errors='replace')
 
-        stdin_task = asyncio.create_task(write_stdin())
-
-        # Concurrent stderr reading
-        async def read_stderr():
-            stderr_data = b''
-            while True:
-                try:
-                    chunk = await asyncio.wait_for(process.stderr.read(1024), timeout=1)
-                    if not chunk:
-                        break
-                    stderr_data += chunk
-                    if DEBUG:
-                        log(f"Stderr: {chunk.decode('utf-8', errors='replace')[:200]}")
-                except asyncio.TimeoutError:
-                    continue
-                except:
-                    break
-            return stderr_data
-
-        stderr_task = asyncio.create_task(read_stderr())
-
-        # Chunk reading with buffer handling
-        buffer = ""
-        pending_bytes = b''
-        chunk_count = 0
-        CHUNK_SIZE = 4096
-        READ_TIMEOUT = 10
-        total_wait = 0
-
-        while True:
-            try:
-                chunk = await asyncio.wait_for(
-                    process.stdout.read(CHUNK_SIZE),
-                    timeout=READ_TIMEOUT
-                )
-                total_wait = 0
-            except asyncio.TimeoutError:
-                total_wait += READ_TIMEOUT
-                if total_wait >= TIMEOUT:
-                    log("Gemini CLI total timeout")
-                    break
-                # Send heartbeat signal
-                yield None
-                continue
-
-            if not chunk:
-                log(f"gemini-cli: EOF reached after {chunk_count} chunks")
-                break
-
-            chunk_count += 1
-            chunk = pending_bytes + chunk
-            pending_bytes = b''
-
-            # Handle UTF-8 multi-byte character truncation
-            try:
-                chunk_str = chunk.decode('utf-8')
-            except UnicodeDecodeError:
-                for i in range(1, 4):
-                    try:
-                        chunk_str = chunk[:-i].decode('utf-8')
-                        pending_bytes = chunk[-i:]
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                else:
-                    chunk_str = chunk.decode('utf-8', errors='replace')
-                    pending_bytes = b''
-            buffer += chunk_str
+        log(f"[OUTPUT FILE] {output_file} ({len(raw_bytes)} bytes)")
 
         # Parse complete JSON output
         log(f"gemini-cli: parsing buffer: {len(buffer)} chars")
 
-        # Detect 429 error
-        is_429_error = '429' in buffer or 'exhausted' in buffer.lower() or 'quota' in buffer.lower()
+        # 保存CLI返回的完整原始字节（不做任何处理）
+        raw_save_dir = "/app/logs"
+        os.makedirs(raw_save_dir, exist_ok=True)
+        raw_filename = f"{raw_save_dir}/raw_bytes_{int(time.time())}_{retry_count}.txt"
+        try:
+            with open(raw_filename, 'wb') as f:
+                f.write(raw_bytes)
+            log(f"[RAW BYTES SAVED] {raw_filename} ({len(raw_bytes)} bytes)")
+        except Exception as e:
+            log(f"[RAW SAVE ERROR] {e}")
 
-        if is_429_error and retry_count < MAX_RETRIES:
-            log(f"gemini-cli: detected 429 error, retrying in {RETRY_DELAY}s (attempt {retry_count + 1}/{MAX_RETRIES})")
-            if process and process.returncode is None:
-                process.kill()
-                await process.wait()
+        # 统一重试函数
+        async def do_retry(reason: str):
+            delay = RETRY_DELAY * (retry_count + 1)
+            log(f"gemini-cli: {reason}, retrying in {delay}s (attempt {retry_count + 1}/{MAX_RETRIES})")
             try:
                 os.unlink(prompt_file)
             except:
                 pass
-            await asyncio.sleep(RETRY_DELAY)
-            async for chunk in call_gemini_cli_stream(prompt, model, retry_count + 1):
-                yield chunk
+            await asyncio.sleep(delay)
+            async for c in call_gemini_cli_stream(prompt, model, retry_count + 1):
+                yield c
+
+        # 1. 检查进程退出码
+        if process.returncode != 0 and process.returncode is not None:
+            log(f"gemini-cli: process failed with exit code {process.returncode}")
+            if retry_count < MAX_RETRIES:
+                async for c in do_retry(f"exit code {process.returncode}"):
+                    yield c
+                return
+
+        # 2. 检测 429 错误
+        is_429_error = '429' in buffer or 'exhausted' in buffer.lower() or 'quota' in buffer.lower()
+        if is_429_error and retry_count < MAX_RETRIES:
+            async for c in do_retry("429 error"):
+                yield c
             return
 
+        # 3. 解析 JSON
         try:
             data = json.loads(buffer.strip())
             if 'response' in data:
@@ -236,11 +195,23 @@ async def call_gemini_cli_stream(prompt: str, model: str, retry_count: int = 0) 
                 log(f"gemini-cli: extracted response, length={len(content)}")
                 if content:
                     yield content
+                elif retry_count < MAX_RETRIES:
+                    async for c in do_retry("empty response"):
+                        yield c
+                    return
             else:
                 log(f"gemini-cli: no 'response' field in JSON, keys={list(data.keys())}")
+                if retry_count < MAX_RETRIES:
+                    async for c in do_retry("no response field"):
+                        yield c
+                    return
         except json.JSONDecodeError as e:
             log(f"gemini-cli: JSON parse error: {e}")
             log(f"gemini-cli: raw buffer: {buffer[:1000]}")
+            if retry_count < MAX_RETRIES:
+                async for c in do_retry("JSON parse error"):
+                    yield c
+                return
 
     except asyncio.TimeoutError:
         log("Gemini CLI timeout")
@@ -253,6 +224,10 @@ async def call_gemini_cli_stream(prompt: str, model: str, retry_count: int = 0) 
             await process.wait()
         try:
             os.unlink(prompt_file)
+        except:
+            pass
+        try:
+            os.unlink(output_file)
         except:
             pass
 
@@ -426,5 +401,5 @@ async def health():
 
 if __name__ == '__main__':
     import uvicorn
-    port = int(os.environ.get('PORT', '3000'))
+    port = int(os.environ.get('PORT', '3003'))
     uvicorn.run(app, host='0.0.0.0', port=port)
