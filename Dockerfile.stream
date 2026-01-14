@@ -1,0 +1,10 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装 Python 依赖
+RUN pip3 install --no-cache-dir fastapi uvicorn httpx docker
+
+COPY proxy.py .
+
+CMD ["uvicorn", "proxy:app", "--host", "0.0.0.0", "--port", "3002", "--timeout-keep-alive", "600", "--workers", "1"]
